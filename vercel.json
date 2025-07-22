@@ -1,0 +1,9 @@
+{
+  "routes": [
+    {
+      "src": "/api/github-webhook",
+      "methods": ["POST"],
+      "dest": "/api/github-webhook.js"
+    }
+  ]
+}
