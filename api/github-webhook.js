@@ -26,7 +26,10 @@ export default async (req, res) => {
       const job = payload.workflow_job;
       const repo = payload.repository.full_name;
       
-      // 4. Build Feishu message
+      // 4. Calculate duration properly
+      const duration = calculateJobDuration(job.started_at, job.completed_at);
+      
+      // 5. Build Feishu message
       const message = {
         msg_type: "interactive",
         card: {
@@ -47,7 +50,7 @@ export default async (req, res) => {
                   `**Job**: ${job.name}\n` +
                   `**Status**: ${job.conclusion}\n` +
                   `**Branch**: ${job.head_branch}\n` +
-                  `**Duration**: ${Math.round(job.completed_at - job.started_at)}s`
+                  `**Duration**: ${duration}`
               }
             },
             {
@@ -63,14 +66,14 @@ export default async (req, res) => {
         }
       };
 
-      // 5. Add Feishu signature if configured
+      // 6. Add Feishu signature if configured
       if (process.env.FEISHU_SECRET) {
         const timestamp = Math.floor(Date.now() / 1000).toString();
         message.timestamp = timestamp;
         message.sign = generateFeishuSignature(process.env.FEISHU_SECRET, timestamp);
       }
 
-      // 6. Send to Feishu using native fetch
+      // 7. Send to Feishu using native fetch
       const feishuResponse = await fetch(process.env.FEISHU_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -110,4 +113,24 @@ function generateFeishuSignature(secret, timestamp) {
   const stringToSign = `${timestamp}\n${secret}`;
   return crypto.createHmac('sha256', stringToSign)
     .digest('base64');
+}
+
+// Properly calculate job duration
+function calculateJobDuration(startedAt, completedAt) {
+  try {
+    // Convert ISO strings to timestamps
+    const start = new Date(startedAt).getTime();
+    const end = new Date(completedAt).getTime();
+    
+    // Calculate duration in seconds
+    const seconds = Math.round((end - start) / 1000);
+    
+    // Format as MM:SS
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes}m ${remainingSeconds}s`;
+  } catch (e) {
+    console.error('Duration calculation error:', e);
+    return 'N/A';
+  }
 }
