@@ -1,38 +1,40 @@
+// api/github-webhook.js
 import crypto from 'crypto';
 import axios from 'axios';
 
 export default async (req, res) => {
   try {
-    // 验证 GitHub 签名
-    const githubSignature = req.headers['x-hub-signature-256'] || '';
-    const githubEvent = req.headers['x-github-event'] || '';
+    // 1. Get raw request body
+    const rawBody = await getRawBody(req);
+    const payload = JSON.parse(rawBody);
     
+    // 2. Verify GitHub signature
+    const githubSignature = req.headers['x-hub-signature-256'] || '';
     if (process.env.GITHUB_WEBHOOK_SECRET) {
       const expectedSignature = 'sha256=' + 
         crypto.createHmac('sha256', process.env.GITHUB_WEBHOOK_SECRET)
-          .update(JSON.stringify(req.body))
+          .update(rawBody)
           .digest('hex');
       
-      if (!crypto.timingSafeEqual(
-        Buffer.from(githubSignature), 
-        Buffer.from(expectedSignature)
-      )) {
+      if (githubSignature !== expectedSignature) {
         return res.status(401).json({ error: 'Invalid signature' });
       }
     }
 
-    // 只处理 workflow_job 完成事件
-    if (githubEvent === 'workflow_job' && req.body.action === 'completed') {
-      const { workflow_job: job, repository } = req.body;
+    // 3. Process workflow_job events
+    const eventType = req.headers['x-github-event'];
+    if (eventType === "workflow_job" && payload.action === "completed") {
+      const job = payload.workflow_job;
+      const repo = payload.repository.full_name;
       
-      // 构建飞书消息
+      // 4. Build Feishu message
       const message = {
         msg_type: "interactive",
         card: {
           header: {
             title: {
               tag: "plain_text",
-              content: `Job ${job.conclusion.toUpperCase()}: ${repository.full_name}`
+              content: `Job ${job.conclusion.toUpperCase()}: ${repo}`
             },
             template: job.conclusion === "success" ? "green" : "red"
           },
@@ -44,15 +46,16 @@ export default async (req, res) => {
                 content: 
                   `**Workflow**: ${job.workflow_name}\n` +
                   `**Job**: ${job.name}\n` +
-                  `**状态**: ${job.conclusion}\n` +
-                  `**触发分支**: ${job.head_branch}`
+                  `**Status**: ${job.conclusion}\n` +
+                  `**Branch**: ${job.head_branch}\n` +
+                  `**Duration**: ${Math.round(job.completed_at - job.started_at)}s`
               }
             },
             {
               tag: "action",
               actions: [{
                 tag: "button",
-                text: { tag: "plain_text", content: "查看日志" },
+                text: { tag: "plain_text", content: "View Logs" },
                 url: job.html_url,
                 type: "primary"
               }]
@@ -61,38 +64,40 @@ export default async (req, res) => {
         }
       };
 
-      // 添加飞书签名（如果配置了）
+      // 5. Add Feishu signature if configured
       if (process.env.FEISHU_SECRET) {
         const timestamp = Math.floor(Date.now() / 1000).toString();
-        const sign = generateFeishuSignature(
-          process.env.FEISHU_SECRET, 
-          timestamp
-        );
-        
         message.timestamp = timestamp;
-        message.sign = sign;
+        message.sign = generateFeishuSignature(process.env.FEISHU_SECRET, timestamp);
       }
 
-      // 发送到飞书
+      // 6. Send to Feishu
       await axios.post(process.env.FEISHU_WEBHOOK_URL, message);
+      return res.status(200).json({ success: true });
     }
-
-    res.status(200).json({ status: "processed" });
+    
+    res.status(200).json({ message: 'Event ignored' });
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ 
+      error: 'Server error',
+      details: error.message 
+    });
   }
 };
 
-// 生成飞书签名
-function generateFeishuSignature(secret, timestamp) {
-  const stringToSign = `${timestamp}\n${secret}`;
-  const hmac = crypto.createHmac('sha256', stringToSign);
-  return hmac.digest('base64');
+// Helper function to get raw body
+function getRawBody(req) {
+  return new Promise((resolve) => {
+    let data = '';
+    req.on('data', chunk => data += chunk);
+    req.on('end', () => resolve(data));
+  });
 }
 
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
+// Generate Feishu signature
+function generateFeishuSignature(secret, timestamp) {
+  const stringToSign = `${timestamp}\n${secret}`;
+  return crypto.createHmac('sha256', stringToSign)
+    .digest('base64');
+}
